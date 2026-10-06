@@ -136,7 +136,7 @@ struct DistortionCoverage {
 };
 struct Report {
     bool success = false, initialized = false, connected = false, poseValid = false, quit = false;
-    std::string error, model, serial, manufacturer, driver, actualDriver, resourceRoot, registeredType, driverVersion, gpu;
+    std::string error, model, manufacturer, driver, actualDriver, resourceRoot, registeredType, driverVersion, gpu;
     std::string sceneImage = "world-locked quiet room, grid floor, stationary sphere";
     uint32_t recW = 0, recH = 0, width = 0, height = 0, initialScenePid = 0, finalScenePid = 0;
     int adapterIndex = -1, initError = 0; float hz = 0;
@@ -147,15 +147,67 @@ struct Report {
     std::map<int, uint64_t> submitErrors;
     std::vector<vr::Compositor_FrameTiming> timings;
     DistortionCoverage coverage;
+    vr::Compositor_CumulativeStats cumulativeStart{}, cumulativeEnd{};
+    uint64_t vsyncCounterStart = 0, vsyncCounterEnd = 0;
+    bool vsyncStartValid = false, vsyncEndValid = false;
+    float sinceVsyncStart = 0, sinceVsyncEnd = 0;
     void Timing(vr::IVRCompositor* compositor) {
         vr::Compositor_FrameTiming t{}; t.m_nSize = sizeof(t);
-        if (!compositor->GetFrameTiming(&t)) return;
+        // Read a completed older entry; the newest frame may not have final GPU/present data.
+        if (!compositor->GetFrameTiming(&t, 1)) return;
         if (!timings.empty() && timings.back().m_nFrameIndex == t.m_nFrameIndex) return;
         timings.push_back(t); ++timingCount;
         preGpu += t.m_flPreSubmitGpuMs; compGpu += t.m_flCompositorRenderGpuMs; totalGpu += t.m_flTotalRenderGpuMs;
         compCpu += t.m_flCompositorRenderCpuMs; clientInterval += t.m_flClientFrameIntervalMs;
         presented += t.m_nNumFramePresents; dropped += t.m_nNumDroppedFrames; mispresented += t.m_nNumMisPresented;
         if (t.m_nReprojectionFlags != 0) ++reprojected;
+    }
+    static void SaveCumulative(std::ostream& o, const vr::Compositor_CumulativeStats& s) {
+        o << "{\"pid\":" << s.m_nPid << ",\"framePresents\":" << s.m_nNumFramePresents
+          << ",\"droppedFrames\":" << s.m_nNumDroppedFrames << ",\"reprojectedFrames\":" << s.m_nNumReprojectedFrames
+          << ",\"framePresentsOnStartup\":" << s.m_nNumFramePresentsOnStartup
+          << ",\"droppedFramesOnStartup\":" << s.m_nNumDroppedFramesOnStartup
+          << ",\"reprojectedFramesOnStartup\":" << s.m_nNumReprojectedFramesOnStartup
+          << ",\"loadingCount\":" << s.m_nNumLoading << ",\"framePresentsLoading\":" << s.m_nNumFramePresentsLoading
+          << ",\"droppedFramesLoading\":" << s.m_nNumDroppedFramesLoading << ",\"reprojectedFramesLoading\":" << s.m_nNumReprojectedFramesLoading
+          << ",\"timedOutCount\":" << s.m_nNumTimedOut << ",\"framePresentsTimedOut\":" << s.m_nNumFramePresentsTimedOut
+          << ",\"droppedFramesTimedOut\":" << s.m_nNumDroppedFramesTimedOut << ",\"reprojectedFramesTimedOut\":" << s.m_nNumReprojectedFramesTimedOut
+          << ",\"frameSubmits\":" << s.m_nNumFrameSubmits
+          << ",\"sumCompositorCpuMs\":" << s.m_flSumCompositorCPUTimeMS << ",\"sumCompositorGpuMs\":" << s.m_flSumCompositorGPUTimeMS
+          << ",\"sumTargetFrameTimes\":" << s.m_flSumTargetFrameTimes
+          << ",\"sumApplicationCpuMs\":" << s.m_flSumApplicationCPUTimeMS << ",\"sumApplicationGpuMs\":" << s.m_flSumApplicationGPUTimeMS
+          << ",\"framesWithDepth\":" << s.m_nNumFramesWithDepth << '}';
+    }
+    void SaveInterval(std::ostream& o) const {
+        const bool valid = elapsed > 0 && cumulativeStart.m_nPid != 0 && cumulativeStart.m_nPid == cumulativeEnd.m_nPid
+            && cumulativeStart.m_nPid == initialScenePid && initialScenePid == finalScenePid
+            && cumulativeEnd.m_nNumFrameSubmits >= cumulativeStart.m_nNumFrameSubmits
+            && cumulativeEnd.m_nNumFramePresents >= cumulativeStart.m_nNumFramePresents
+            && cumulativeEnd.m_nNumReprojectedFrames >= cumulativeStart.m_nNumReprojectedFrames
+            && cumulativeEnd.m_nNumDroppedFrames >= cumulativeStart.m_nNumDroppedFrames;
+        o << "{\"valid\":" << valid << ",\"start\":"; SaveCumulative(o, cumulativeStart);
+        o << ",\"end\":"; SaveCumulative(o, cumulativeEnd);
+        if (valid) {
+            const auto submits = cumulativeEnd.m_nNumFrameSubmits - cumulativeStart.m_nNumFrameSubmits;
+            const auto presents = cumulativeEnd.m_nNumFramePresents - cumulativeStart.m_nNumFramePresents;
+            const auto reprojects = cumulativeEnd.m_nNumReprojectedFrames - cumulativeStart.m_nNumReprojectedFrames;
+            const auto drops = cumulativeEnd.m_nNumDroppedFrames - cumulativeStart.m_nNumDroppedFrames;
+            o << ",\"deltaFrameSubmits\":" << submits << ",\"deltaFramePresents\":" << presents
+              << ",\"deltaReprojectedFrames\":" << reprojects << ",\"deltaDroppedFrames\":" << drops
+              << ",\"applicationSubmitsPerSecond\":" << submits / elapsed << ",\"compositorPresentsPerSecond\":" << presents / elapsed
+              << ",\"reprojectedFramesPerSecond\":" << reprojects / elapsed;
+            if (submits) o << ",\"meanApplicationCpuMs\":" << (cumulativeEnd.m_flSumApplicationCPUTimeMS-cumulativeStart.m_flSumApplicationCPUTimeMS)/submits
+                << ",\"meanApplicationGpuMs\":" << (cumulativeEnd.m_flSumApplicationGPUTimeMS-cumulativeStart.m_flSumApplicationGPUTimeMS)/submits
+                << ",\"meanCompositorCpuMs\":" << (cumulativeEnd.m_flSumCompositorCPUTimeMS-cumulativeStart.m_flSumCompositorCPUTimeMS)/submits
+                << ",\"meanCompositorGpuMs\":" << (cumulativeEnd.m_flSumCompositorGPUTimeMS-cumulativeStart.m_flSumCompositorGPUTimeMS)/submits
+                << ",\"meanTargetFrameTime\":" << (cumulativeEnd.m_flSumTargetFrameTimes-cumulativeStart.m_flSumTargetFrameTimes)/submits;
+        }
+        o << ",\"counterVsyncStartValid\":" << vsyncStartValid << ",\"counterVsyncEndValid\":" << vsyncEndValid
+          << ",\"counterVsyncStart\":" << vsyncCounterStart << ",\"counterVsyncEnd\":" << vsyncCounterEnd
+          << ",\"secondsSinceVsyncStart\":" << sinceVsyncStart << ",\"secondsSinceVsyncEnd\":" << sinceVsyncEnd;
+        if (vsyncStartValid && vsyncEndValid && vsyncCounterEnd >= vsyncCounterStart && elapsed > 0)
+            o << ",\"vsyncCounterPerSecond\":" << (vsyncCounterEnd-vsyncCounterStart)/elapsed;
+        o << '}';
     }
     void Save(const Options& options) const {
         std::ofstream o(options.report, std::ios::binary); if (!o) throw std::runtime_error("Cannot write report: " + options.report);
@@ -165,7 +217,7 @@ struct Report {
           << ",\n  \"success\": " << success << ",\n  \"error\": " << Quote(error)
           << ",\n  \"vrInitialized\": " << initialized << ",\n  \"vrInitError\": " << initError
           << ",\n  \"hmd\": {\"connected\": " << connected << ", \"poseValid\": " << poseValid
-          << ", \"model\": " << Quote(model) << ", \"serial\": " << Quote(serial)
+          << ", \"model\": " << Quote(model)
           << ", \"manufacturer\": " << Quote(manufacturer) << ", \"trackingSystem\": " << Quote(driver)
           << ", \"actualTrackingSystem\": " << Quote(actualDriver) << ", \"resourceRoot\": " << Quote(resourceRoot)
           << ", \"registeredDeviceType\": " << Quote(registeredType) << ", \"driverVersion\": " << Quote(driverVersion)
@@ -190,16 +242,34 @@ struct Report {
           << ", \"meanClientFrameIntervalMs\": " << clientInterval / n
           << ", \"sampledPresents\": " << presented << ", \"sampledDroppedFrames\": " << dropped
           << ", \"sampledMispresents\": " << mispresented << ", \"samplesWithReprojectionFlags\": " << reprojected
-          << "},\n  \"timingSamples\": [";
+          << ", \"sampleFramesAgo\": 1, \"pollIntervalMilliseconds\": " << (options.probe ? 8 : 0)
+          << ", \"warning\": \"Unique samples per second is polling coverage, not application FPS. Use cumulativeInterval counters for rates. Nonzero flags alone do not mean a reused frame.\""
+          << "},\n  \"cumulativeInterval\": "; SaveInterval(o);
+        o << ",\n  \"timingSamples\": [";
         first = true; for (const auto& t : timings) {
             if (!first) o << ','; first = false;
             o << "\n    {\"frameIndex\":" << t.m_nFrameIndex << ",\"systemSeconds\":" << t.m_flSystemTimeInSeconds
               << ",\"preSubmitGpuMs\":" << t.m_flPreSubmitGpuMs << ",\"compositorGpuMs\":" << t.m_flCompositorRenderGpuMs
+              << ",\"postSubmitGpuMs\":" << t.m_flPostSubmitGpuMs
+              << ",\"compositorCpuMs\":" << t.m_flCompositorRenderCpuMs << ",\"compositorIdleCpuMs\":" << t.m_flCompositorIdleCpuMs
+              << ",\"clientFrameIntervalMs\":" << t.m_flClientFrameIntervalMs << ",\"presentCallCpuMs\":" << t.m_flPresentCallCpuMs
+              << ",\"waitForPresentCpuMs\":" << t.m_flWaitForPresentCpuMs << ",\"submitFrameMs\":" << t.m_flSubmitFrameMs
+              << ",\"waitGetPosesCalledMs\":" << t.m_flWaitGetPosesCalledMs << ",\"newPosesReadyMs\":" << t.m_flNewPosesReadyMs
+              << ",\"newFrameReadyMs\":" << t.m_flNewFrameReadyMs << ",\"compositorUpdateStartMs\":" << t.m_flCompositorUpdateStartMs
+              << ",\"compositorUpdateEndMs\":" << t.m_flCompositorUpdateEndMs << ",\"compositorRenderStartMs\":" << t.m_flCompositorRenderStartMs
               << ",\"totalGpuMs\":" << t.m_flTotalRenderGpuMs << ",\"presents\":" << t.m_nNumFramePresents
-              << ",\"dropped\":" << t.m_nNumDroppedFrames << ",\"reprojectionFlags\":" << t.m_nReprojectionFlags << '}';
+              << ",\"mispresents\":" << t.m_nNumMisPresented << ",\"dropped\":" << t.m_nNumDroppedFrames
+              << ",\"vsyncsReadyForUse\":" << t.m_nNumVSyncsReadyForUse << ",\"vsyncsToFirstView\":" << t.m_nNumVSyncsToFirstView
+              << ",\"transferLatencyMs\":" << t.m_flTransferLatencyMs << ",\"reprojectionFlags\":" << t.m_nReprojectionFlags
+              << ",\"reusedReasonCpu\":" << bool(t.m_nReprojectionFlags & vr::VRCompositor_ReprojectionReason_Cpu)
+              << ",\"reusedReasonGpu\":" << bool(t.m_nReprojectionFlags & vr::VRCompositor_ReprojectionReason_Gpu)
+              << ",\"asyncModeActive\":" << bool(t.m_nReprojectionFlags & vr::VRCompositor_ReprojectionAsync)
+              << ",\"motionSmoothingTriggered\":" << bool(t.m_nReprojectionFlags & vr::VRCompositor_ReprojectionMotion)
+              << ",\"additionalPredictedFrames\":" << VR_COMPOSITOR_ADDITIONAL_PREDICTED_FRAMES(t)
+              << ",\"throttledFrames\":" << VR_COMPOSITOR_NUMBER_OF_THROTTLED_FRAMES(t) << '}';
         }
         o << "\n  ],\n  \"distortionCoverage\": "; coverage.Save(o);
-        o << ",\n  \"limitations\": \"Submissions and runtime timings do not prove optical quality or driver shader execution. Probe timings belong to the runtime's active scene and are sampled, not exhaustive. HMD serial is local diagnostic data.\"\n}\n";
+        o << ",\n  \"limitations\": \"Submissions and runtime timings do not prove optical quality or driver shader execution. Probe timings belong to the runtime's active scene and are sampled, not exhaustive.\"\n}\n";
         if (!o) throw std::runtime_error("Report write failed: " + options.report);
     }
 };
@@ -341,7 +411,7 @@ int main(int argc,char** argv) {
         if(init!=vr::VRInitError_None || !sys) throw std::runtime_error(vr::VR_GetVRInitErrorAsEnglishDescription(init));
         vrOpen=true; report.initialized=true;
         report.connected=sys->IsTrackedDeviceConnected(0);
-        report.model=Property(sys,vr::Prop_ModelNumber_String); report.serial=Property(sys,vr::Prop_SerialNumber_String);
+        report.model=Property(sys,vr::Prop_ModelNumber_String);
         report.manufacturer=Property(sys,vr::Prop_ManufacturerName_String); report.driver=Property(sys,vr::Prop_TrackingSystemName_String);
         // Prop 1000 and model/manufacturer can be spoofed per application for compatibility.
         // 1054 is the runtime's literal local driver name, independent of Prop 1000.
@@ -362,6 +432,8 @@ int main(int argc,char** argv) {
             renderer=std::make_unique<Renderer>(sys,report,options.scale);
         }
         const auto begin=std::chrono::steady_clock::now();
+        compositor->GetCumulativeStats(&report.cumulativeStart, sizeof(report.cumulativeStart));
+        report.vsyncStartValid = sys->GetTimeSinceLastVsync(&report.sinceVsyncStart, &report.vsyncCounterStart);
         auto seconds=[&] { return std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count(); };
         std::array<vr::TrackedDevicePose_t,vr::k_unMaxTrackedDeviceCount> poses{};
         while(seconds()<options.duration) {
@@ -394,6 +466,8 @@ int main(int argc,char** argv) {
                 renderer->context->Flush(); compositor->PostPresentHandoff(); report.Timing(compositor);
             }
         }
+        compositor->GetCumulativeStats(&report.cumulativeEnd, sizeof(report.cumulativeEnd));
+        report.vsyncEndValid = sys->GetTimeSinceLastVsync(&report.sinceVsyncEnd, &report.vsyncCounterEnd);
         report.elapsed=seconds(); report.connected=sys->IsTrackedDeviceConnected(0);
         report.finalScenePid=compositor->GetCurrentSceneFocusProcess();
         report.success=report.connected && !report.quit && (options.probe ||

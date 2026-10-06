@@ -6,7 +6,7 @@ No elevation, process injection, policy changes, or credentials are involved.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Status','Install','Uninstall')][string]$Action = 'Status',
+    [ValidateSet('Status','Install','Configure','Uninstall')][string]$Action = 'Status',
     [ValidateRange(20,100)][int]$ResolutionScale = 67,
     [switch]$SkipResolutionScale,
     [switch]$DryRun

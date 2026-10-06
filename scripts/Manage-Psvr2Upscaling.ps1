@@ -3,7 +3,7 @@
 .SYNOPSIS
 Installs, removes, or inspects the PSVR2 compositor EASU shader patch.
 .DESCRIPTION
-Close SteamVR and VRChat before Install/Uninstall. Status and -DryRun are read-only.
+Close SteamVR and VRChat before Install/Configure/Uninstall. Status and -DryRun are read-only.
 ResolutionScale is SteamVR's per-application pixel percentage, not an axis scale.
 Original shaders and an exact property ledger are retained under BackupRoot.
 Configuration alone does not prove runtime activation or image quality.
@@ -18,7 +18,7 @@ Configuration alone does not prove runtime activation or image quality.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Status', 'Install', 'Uninstall')][string]$Action = 'Status',
+    [ValidateSet('Status', 'Install', 'Configure', 'Uninstall')][string]$Action = 'Status',
     [ValidateRange(20, 100)][int]$ResolutionScale = 67,
     [switch]$SkipResolutionScale,
     [switch]$DryRun,
@@ -34,6 +34,7 @@ $baselineShaderSha256 = '65CAAA283BE3F4FD9B8F62459E2E73D5D3B5136E6448A635C518217
 $shaderNames = @('distort_ps_layered.hlsl', 'psvr2_easu.hlsl')
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) { $SourceRoot = Split-Path -Parent $PSScriptRoot }
+if ($Action -eq 'Configure' -and $SkipResolutionScale) { throw 'Configure requires ResolutionScale; SkipResolutionScale is only an Install option.' }
 
 function Read-Json([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required JSON file is missing: $Path" }
@@ -142,7 +143,8 @@ $driverRoot = Join-Path $runtimeRoot 'drivers\CustomHeadsetOpenVR'
 $shaderRoot = Join-Path $driverRoot 'resources\shaders\d3d11'
 $driverManifest = Read-Json (Join-Path $driverRoot 'driver.vrdrivermanifest')
 $manifestPath = Join-Path $BackupRoot 'current.json'
-$manifest = if (Test-Path -LiteralPath $manifestPath) { Read-Json $manifestPath } else { $null }
+$loadedManifestBytes = if (Test-Path -LiteralPath $manifestPath) { [IO.File]::ReadAllBytes($manifestPath) } else { $null }
+$manifest = if ($null -ne $loadedManifestBytes) { $utf8.GetString($loadedManifestBytes).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { $null }
 $configPaths = @{ customHeadset = $CustomHeadsetSettings; steamVr = $steamSettings }
 $loadedConfigBytes = @{}
 $documents = @{}
@@ -173,6 +175,34 @@ if ($null -ne $manifest) {
             ($entry.file -eq 'steamVr' -and $entry.section -eq 'steam.app.438100' -and $entry.name -eq 'resolutionScale')
         if (-not $allowed) { throw 'Backup manifest contains an unrecognized configuration property.' }
     }
+    $propertyIds = @($manifest.properties | ForEach-Object { $_.file + '/' + $_.section + '/' + $_.name })
+    if (@($propertyIds | Select-Object -Unique).Count -ne $propertyIds.Count -or
+        @($manifest.properties | Where-Object { $_.file -eq 'customHeadset' }).Count -ne 5) {
+        throw 'Backup manifest has duplicate or missing managed properties.'
+    }
+}
+
+# Configure uses a write-ahead journal inside current.json. Its Installed ledger
+# remains unchanged until the settings write has been verified. A later Configure
+# with the same requested value, or Uninstall, can recover either atomic outcome.
+$pendingConfiguration = if (Has-Property $manifest 'pendingConfigure') { $manifest.pendingConfigure } else { $null }
+if ($null -ne $pendingConfiguration) {
+    $next = $pendingConfiguration.entry
+    if ($manifest.state -ne 'Installed' -or $next.file -ne 'steamVr' -or $next.section -ne 'steam.app.438100' -or
+        $next.name -ne 'resolutionScale' -or $next.installed -isnot [ValueType] -or
+        $next.installed -lt 20 -or $next.installed -gt 100 -or [int]$next.installed -ne $next.installed) {
+        throw 'Invalid pending Configure journal.'
+    }
+    $previousScale = @($manifest.properties | Where-Object { $_.file -eq 'steamVr' })
+    if ($previousScale.Count -eq 1) {
+        $previous = $previousScale[0]
+        if (-not $pendingConfiguration.beforeExisted -or -not (Same-Value $pendingConfiguration.beforeValue $previous.installed) -or
+            $next.existed -ne $previous.existed -or $next.sectionExisted -ne $previous.sectionExisted -or
+            -not (Same-Value $next.original $previous.original)) { throw 'Pending Configure journal does not match the original ledger.' }
+    }
+    elseif ($next.existed -ne $pendingConfiguration.beforeExisted -or
+        $next.sectionExisted -ne $pendingConfiguration.beforeSectionExisted -or
+        -not (Same-Value $next.original $pendingConfiguration.beforeValue)) { throw 'Pending Configure journal has inconsistent original values.' }
 }
 
 if ($Action -eq 'Status') {
@@ -187,6 +217,7 @@ if ($Action -eq 'Status') {
         action = 'Status'; driverVersion = $driverManifest.version; driverRoot = $driverRoot
         backupManifest = $(if ($null -ne $manifest) { $manifestPath } else { $null })
         recordedState = $(if ($null -ne $manifest) { $manifest.state } else { 'NotManaged' })
+        pendingConfiguration = $pendingConfiguration
         shaders = @($shaderStatus)
         customShader = $(if (Has-Property $documents.customHeadset 'customShader') { $documents.customHeadset.customShader } else { $null })
         vrchatResolutionScale = $(if (Has-Property $application 'resolutionScale') { $application.resolutionScale } else { $null })
@@ -208,6 +239,15 @@ if ($null -ne $manifest -and $manifest.state -notin @('Prepared', 'Installed', '
 if ($Action -eq 'Uninstall' -and -not $managed) {
     [pscustomobject]@{ action = $Action; changed = $false; detail = 'No active managed installation.' } | ConvertTo-Json
     return
+}
+if ($Action -eq 'Configure' -and ($null -eq $manifest -or $manifest.state -ne 'Installed')) {
+    throw 'Configure requires an Installed generation. Finish or uninstall a Prepared installation first.'
+}
+if ($null -ne $pendingConfiguration -and $Action -eq 'Install') {
+    throw 'A Configure transaction is pending. Repeat Configure with its recorded resolution, or Uninstall, before Install.'
+}
+if ($null -ne $pendingConfiguration -and $Action -eq 'Configure' -and $ResolutionScale -ne $pendingConfiguration.entry.installed) {
+    throw "A Configure transaction is pending. Repeat Configure -ResolutionScale $($pendingConfiguration.entry.installed), or Uninstall, to recover it."
 }
 
 $newManifest = $false
@@ -280,13 +320,14 @@ if ($Action -eq 'Install' -and -not $newManifest) {
     $scaleRecords = @($manifest.properties | Where-Object { $_.file -eq 'steamVr' })
     if (($SkipResolutionScale -and $scaleRecords.Count -gt 0) -or
         (-not $SkipResolutionScale -and ($scaleRecords.Count -ne 1 -or $scaleRecords[0].installed -ne $ResolutionScale))) {
-        throw 'Resolution options differ from the installed generation. Uninstall before changing the deployment profile.'
+        throw 'Resolution options differ from the installed generation. Use Configure to change resolution, or Uninstall before changing the deployment profile.'
     }
 }
 
 # A later user edit to a managed property is a conflict; unrelated properties are
 # always reread and retained. Prepared state also accepts the original value.
 foreach ($entry in $manifest.properties) {
+    if ($null -ne $pendingConfiguration -and $entry.file -eq 'steamVr') { continue }
     $document = $documents[$entry.file]
     $sectionExists = Has-Property $document $entry.section
     if ($sectionExists -and $document.($entry.section) -isnot [pscustomobject]) { throw "Expected an object for $($entry.section)" }
@@ -298,12 +339,109 @@ foreach ($entry in $manifest.properties) {
         throw "Managed setting changed since installation: $($entry.section).$($entry.name). Resolve this conflict before proceeding."
     }
 }
+if ($null -ne $pendingConfiguration) {
+    $sectionExists = Has-Property $documents.steamVr 'steam.app.438100'
+    if ($sectionExists -and $documents.steamVr.'steam.app.438100' -isnot [pscustomobject]) { throw 'Expected an object for steam.app.438100' }
+    $exists = $sectionExists -and (Has-Property $documents.steamVr.'steam.app.438100' 'resolutionScale')
+    $value = if ($exists) { $documents.steamVr.'steam.app.438100'.resolutionScale } else { $null }
+    $matchesBefore = ($exists -eq $pendingConfiguration.beforeExisted) -and (Same-Value $value $pendingConfiguration.beforeValue)
+    $matchesAfter = $exists -and (Same-Value $value $pendingConfiguration.entry.installed)
+    if (-not $matchesBefore -and -not $matchesAfter) { throw 'Managed resolution changed outside the pending Configure transaction.' }
+    if ($Action -eq 'Uninstall') {
+        $manifest.properties = @($manifest.properties | Where-Object { $_.file -ne 'steamVr' }) + @($pendingConfiguration.entry)
+        $manifest.PSObject.Properties.Remove('pendingConfigure')
+    }
+}
 
 $report = [pscustomobject]@{
     action = $Action; dryRun = [bool]$DryRun; driverRoot = $driverRoot; backupManifest = $manifestPath
     shaders = $manifest.files; properties = $manifest.properties
     runningProcesses = @(Get-RunningVrProcesses)
     runtimeActivation = 'Unverified: successful deployment is not proof of runtime activation.'
+}
+if ($Action -eq 'Configure') {
+    $scaleRecords = @($manifest.properties | Where-Object { $_.file -eq 'steamVr' })
+    $nextEntry = if ($null -ne $pendingConfiguration) { $pendingConfiguration.entry }
+        elseif ($scaleRecords.Count -eq 1) { $scaleRecords[0] | ConvertTo-Json -Depth 50 | ConvertFrom-Json }
+        else { Get-LedgerItem $documents.steamVr 'steamVr' 'steam.app.438100' 'resolutionScale' $ResolutionScale }
+    $nextEntry.installed = $ResolutionScale
+    $nextProperties = @($manifest.properties | Where-Object { $_.file -ne 'steamVr' }) + @($nextEntry)
+    $report.properties = $nextProperties
+    Set-Property $report 'state' 'Installed'
+    $changeNeeded = $null -ne $pendingConfiguration -or $scaleRecords.Count -eq 0 -or -not (Same-Value $scaleRecords[0].installed $ResolutionScale)
+    Set-Property $report 'changed' ([bool]$changeNeeded)
+    if ($DryRun -or -not $changeNeeded) { $report | ConvertTo-Json -Depth 50; return }
+
+    # No shader/custom-headset writes in Configure. Keep the original generation
+    # and immutable original-manifest.json, even when management starts after Skip.
+    Test-WriteAccess $steamSettings
+    Test-WriteAccess $manifestPath
+    $originalSteamBytes = $loadedConfigBytes.steamVr
+    $nextManifest = $manifest | ConvertTo-Json -Depth 50 | ConvertFrom-Json
+    $nextManifest.properties = $nextProperties
+    $nextManifest.PSObject.Properties.Remove('pendingConfigure')
+    Set-Property $nextManifest 'updatedUtc' ([DateTime]::UtcNow.ToString('o'))
+    $journalManifest = $manifest | ConvertTo-Json -Depth 50 | ConvertFrom-Json
+    if ($null -eq $pendingConfiguration) {
+        $before = Get-LedgerItem $documents.steamVr 'steamVr' 'steam.app.438100' 'resolutionScale' $ResolutionScale
+        Set-Property $journalManifest 'pendingConfigure' ([pscustomobject]@{
+            beforeSectionExisted = $before.sectionExisted; beforeExisted = $before.existed; beforeValue = $before.original
+            entry = $nextEntry; preparedUtc = [DateTime]::UtcNow.ToString('o')
+        })
+    }
+    Apply-Ledger $documents @($nextEntry) $false
+    $nextSteamBytes = Json-Bytes $documents.steamVr
+    Assert-Stopped
+    foreach ($key in $configPaths.Keys) {
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPaths[$key])) -cne [Convert]::ToBase64String($loadedConfigBytes[$key])) {
+            throw "Configuration changed during preflight: $($configPaths[$key]). Retry after closing the settings editor."
+        }
+    }
+    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath)) -cne [Convert]::ToBase64String($loadedManifestBytes)) {
+        throw 'Backup manifest changed during Configure preflight.'
+    }
+    foreach ($file in $manifest.files) {
+        if ((Sha256 (Join-Path $shaderRoot $file.name)) -ne $file.installedSha256) { throw 'Shader changed during Configure preflight.' }
+    }
+    $journalWritten = $false
+    $settingsAttempted = $false
+    try {
+        Write-Atomic $manifestPath (Json-Bytes $journalManifest)
+        $journalWritten = $true
+        $settingsAttempted = $true
+        Write-Atomic $steamSettings $nextSteamBytes
+        if (-not (Same-Value (Read-Json $steamSettings) $documents.steamVr)) { throw 'Configure JSON readback failed.' }
+        Write-Atomic $manifestPath (Json-Bytes $nextManifest)
+        if (-not (Same-Value (Read-Json $manifestPath) $nextManifest)) { throw 'Configure manifest readback failed.' }
+    }
+    catch {
+        $failure = $_
+        $rollbackFailures = @()
+        if ($journalWritten) {
+            if ($settingsAttempted) {
+                try {
+                    # An OS sharing violation can leave the original file intact.
+                    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($steamSettings)) -cne [Convert]::ToBase64String($originalSteamBytes)) {
+                        Write-Atomic $steamSettings $originalSteamBytes
+                    }
+                }
+                catch { $rollbackFailures += "Settings rollback: $_" }
+            }
+            if ($rollbackFailures.Count -eq 0) {
+                try { Write-Atomic $manifestPath $loadedManifestBytes }
+                catch { $rollbackFailures += "Manifest rollback: $_" }
+            }
+            else {
+                # Preserve recovery metadata if either atomic settings outcome remains.
+                try { Write-Atomic $manifestPath (Json-Bytes $journalManifest) }
+                catch { $rollbackFailures += "Recovery journal: $_" }
+            }
+        }
+        if ($rollbackFailures.Count) { throw "Configure failed: $failure. Recovery may be needed: $($rollbackFailures -join '; ')" }
+        throw "Configure failed; changed files were rolled back: $failure"
+    }
+    $report | ConvertTo-Json -Depth 50
+    return
 }
 if ($DryRun) { $report | ConvertTo-Json -Depth 50; return }
 

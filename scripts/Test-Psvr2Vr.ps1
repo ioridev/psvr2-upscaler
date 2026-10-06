@@ -73,7 +73,7 @@ if ($DistortionCoverage) {
 & $exe @runArgs
 if ($LASTEXITCODE -ne 0) { throw "VR validation failed (exit $LASTEXITCODE); see $ReportPath" }
 $report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
-# Do not echo the HMD serial captured in the local JSON diagnostic.
+# Keep the console summary limited to device type and validation results.
 [pscustomobject]@{
     Success = $report.success
     Mode = $report.mode

@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Status','Install','Uninstall')][string]$Action = 'Status',
+    [ValidateSet('Status','Install','Configure','Uninstall')][string]$Action = 'Status',
     [int]$ResolutionScale = 67,
     [switch]$SkipResolutionScale,
     [switch]$DryRun,

@@ -51,6 +51,7 @@
     "submitErrors": {}
   },
   "vrchat": {
+    "userReportedDisplayLooksGood": true,
     "activeSceneUnchanged": true,
     "frameTimingSamples": 457,
     "source": "VRChat OpenVR initialization log + background OpenVR frame timings",
@@ -66,7 +67,7 @@
     ]
   },
   "limitations": [
-    "Subjective in-headset image quality not confirmed by user",
+    "Display quality was accepted by one user; no broad compatibility or quality study",
     "No controlled before-after VRChat FPS comparison",
     "EAC certification and future compatibility not claimed",
     "VRChat exact submitted texture dimensions were not read; 67 percent is runtime setting, 2783x2839 was independently submitted by test scene"

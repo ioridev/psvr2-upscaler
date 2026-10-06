@@ -4,5 +4,6 @@
 *.py text eol=lf
 *.cpp text eol=lf
 *.md text eol=lf
+*.cmd text eol=crlf
 # Preserve the vendor shader's whitespace so generation is a minimal patch.
 shaders/distort_ps_layered.hlsl -whitespace

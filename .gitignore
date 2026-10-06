@@ -3,5 +3,6 @@ research/
 artifacts/
 build/
 results/
+dist/
 *.user
 __pycache__/
