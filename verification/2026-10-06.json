@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-06",
+  "implementation": "FSR 1 EASU resampling in CustomHeadsetOpenVR compositor shader (no RCAS)",
+  "physicalHostInstall": {
+    "filter": "FSR_EASU",
+    "vrchatPixelPercent": 67,
+    "state": "Installed",
+    "verifiedShaderHashes": [
+      {
+        "name": "distort_ps_layered.hlsl",
+        "sha256": "10E0B07026B3F3491AAC51A0AD7FA4AB3E302E39C5B0CF2DAB39E82E3B0050C4",
+        "matchesRecordedPatch": true
+      },
+      {
+        "name": "psvr2_easu.hlsl",
+        "sha256": "F411A801EABA354959C7EE2918843005D9CF2CC21D14E00A84666D89E80D13A7",
+        "matchesRecordedPatch": true
+      }
+    ]
+  },
+  "gpu": {
+    "scope": "D3D11 hardware offscreen helper; not a headset or full compositor benchmark",
+    "adapter": "AMD Radeon RX 9070",
+    "failed": 0,
+    "checks": 36,
+    "passed": true
+  },
+  "shaderCompilation": {
+    "passed": 9,
+    "variants": 9
+  },
+  "runtimeShader": {
+    "compileErrors": 0,
+    "replacementLogs": 15,
+    "source": "artifacts/runtime/vr-shader-debug.jsonl",
+    "compileOrCacheSuccessLogs": 27,
+    "compositorPid": 17556
+  },
+  "psvr2Scene": {
+    "displayHz": 119.879791,
+    "recommendedPerEye": {
+      "width": 3400,
+      "height": 3468
+    },
+    "inputPerEye": {
+      "width": 2783,
+      "height": 2839
+    },
+    "actualDriver": "playstation_vr2",
+    "acceptedStereoFrames": 2390,
+    "submitErrors": {}
+  },
+  "vrchat": {
+    "activeSceneUnchanged": true,
+    "frameTimingSamples": 457,
+    "source": "VRChat OpenVR initialization log + background OpenVR frame timings",
+    "pid": 15776,
+    "eacProcessObserved": true
+  },
+  "distortionEstimate": {
+    "scope": "Static public ComputeDistortion estimate, not measured shader coverage",
+    "allCallsSucceeded": true,
+    "inBoundsEasuFractionGreen": [
+      0.230496454,
+      0.229181495
+    ]
+  },
+  "limitations": [
+    "Subjective in-headset image quality not confirmed by user",
+    "No controlled before-after VRChat FPS comparison",
+    "EAC certification and future compatibility not claimed",
+    "VRChat exact submitted texture dimensions were not read; 67 percent is runtime setting, 2783x2839 was independently submitted by test scene"
+  ]
+}

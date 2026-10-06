@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.hlsl text eol=lf
+*.ps1 text eol=lf
+*.py text eol=lf
+*.cpp text eol=lf
+*.md text eol=lf
+# Preserve the vendor shader's whitespace so generation is a minimal patch.
+shaders/distort_ps_layered.hlsl -whitespace

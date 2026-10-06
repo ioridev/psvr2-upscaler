@@ -1,0 +1,7 @@
+external/
+research/
+artifacts/
+build/
+results/
+*.user
+__pycache__/
